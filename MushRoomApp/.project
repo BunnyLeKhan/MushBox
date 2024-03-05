@@ -2014,11 +2014,6 @@
 			<location>D:/ESP_projects/esp-idf/components/lwip/port/sockets_ext.c</location>
 		</link>
 		<link>
-			<name>build/ide/esp_idf_components/mbedtls/esp_crt_bundle/esp_crt_bundle.c</name>
-			<type>1</type>
-			<location>D:/ESP_projects/esp-idf/components/mbedtls/esp_crt_bundle/esp_crt_bundle.c</location>
-		</link>
-		<link>
 			<name>build/ide/esp_idf_components/mbedtls/port/esp_hardware.c</name>
 			<type>1</type>
 			<location>D:/ESP_projects/esp-idf/components/mbedtls/port/esp_hardware.c</location>

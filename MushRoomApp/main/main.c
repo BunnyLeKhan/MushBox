@@ -6,12 +6,19 @@
    software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
    CONDITIONS OF ANY KIND, either express or implied.
 */
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 
 #include "esp_system.h"
+#include "spi_flash_mmap.h"
+#include <esp_http_server.h>
+#include "esp_spiffs.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -63,6 +70,11 @@
 #define BLINK_GPIO  CONFIG_BLINK_GPIO
 #define BUTTON_GPIO CONFIG_BUTTON_GPIO
 
+#define INDEX_HTML_PATH "/spiffs/index.html"
+
+char index_html[4096];
+char response_data[4096];
+
 static uint8_t s_led_state = 0;
 
 /* FreeRTOS event group to signal when we are connected*/
@@ -78,6 +90,176 @@ static const char *TAG = "MAIN";
 
 static int s_retry_num = 0;
 
+static void initi_web_page_buffer(void)
+{
+	esp_vfs_spiffs_conf_t conf = {
+	    .base_path = "/spiffs",
+	    .partition_label = NULL,
+	    .max_files = 5,
+	    .format_if_mount_failed = true};
+
+	ESP_ERROR_CHECK(esp_vfs_spiffs_register(&conf));
+
+	DIR* dir = opendir("/spiffs");
+	if (!dir) {
+	    ESP_LOGE(TAG, "Failed to open directory");
+	    return;
+	}
+
+	struct dirent* entry;
+	while ((entry = readdir(dir)) != NULL) {
+	    char path[1024];
+	    snprintf(path, sizeof(path), "/spiffs/%s", entry->d_name);
+
+	    struct stat st;
+	    if (stat(path, &st)) {
+	        ESP_LOGE(TAG, "Failed to stat %s", path);
+	        continue;
+	    }
+
+	    char* buffer = malloc(st.st_size + 1);
+	    if (!buffer) {
+	        ESP_LOGE(TAG, "Failed to allocate memory for %s", path);
+	        continue;
+	    }
+
+	    FILE *fp = fopen(path, "r");
+	    if (fread(buffer, st.st_size, 1, fp) == 0) {
+	        ESP_LOGE(TAG, "Failed to read %s", path);
+	    }
+	    buffer[st.st_size] = '\0';  // Null-terminate the buffer
+	    fclose(fp);
+
+	    free(buffer);
+	}
+
+	closedir(dir);
+}
+
+esp_err_t file_get_handler(httpd_req_t *req)
+{
+    char filepath[1024];
+
+    if (strcmp(req->uri, "/") == 0) {
+        snprintf(filepath, sizeof(filepath), "/spiffs/index.html");
+    } else {
+        snprintf(filepath, sizeof(filepath), "/spiffs%s", req->uri);
+    }
+
+    const char *type = "text/plain";
+    if (strstr(filepath, ".html")) {
+        type = "text/html";
+    } else if (strstr(filepath, ".css")) {
+        type = "text/css";
+    } else if (strstr(filepath, ".js")) {
+        type = "text/javascript";
+    } // Add more types if needed
+
+    httpd_resp_set_type(req, type);
+
+    FILE* f = fopen(filepath, "r");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s: %s", filepath, strerror(errno));
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+
+    char buf[1024];
+    int read_len;
+    while ((read_len = fread(buf, 1, sizeof(buf), f)) > 0) {
+        httpd_resp_send_chunk(req, buf, read_len);
+    }
+
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);  // Send the last chunk
+
+    return ESP_OK;
+}
+
+esp_err_t led_on_handler(httpd_req_t *req)
+{
+    gpio_set_level(BLINK_GPIO, 1);
+    s_led_state = 1;
+    return httpd_resp_send(req, HTTPD_200, HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t led_off_handler(httpd_req_t *req)
+{
+    gpio_set_level(BLINK_GPIO, 0);
+    s_led_state = 0;
+    return httpd_resp_send(req, HTTPD_200, HTTPD_RESP_USE_STRLEN);
+}
+
+httpd_uri_t uri_on = {
+    .uri = "/ledOn",
+    .method = HTTP_GET,
+    .handler = led_on_handler,
+    .user_ctx = NULL
+};
+
+httpd_uri_t uri_off = {
+    .uri = "/ledOff",
+    .method = HTTP_GET,
+    .handler = led_off_handler,
+    .user_ctx = NULL
+};
+
+httpd_uri_t uri_main = {
+    .uri = "/",  // Match all URIs
+    .method = HTTP_GET,
+    .handler = file_get_handler,
+    .user_ctx = NULL
+};
+
+httpd_uri_t uri_style_get = {
+    .uri = "/style.css",  // Match all URIs
+    .method = HTTP_GET,
+    .handler = file_get_handler,
+    .user_ctx = NULL
+};
+
+httpd_uri_t uri_w3_get = {
+    .uri = "/w3.css",  // Match all URIs
+    .method = HTTP_GET,
+    .handler = file_get_handler,
+    .user_ctx = NULL
+};
+
+httpd_uri_t uri_script_get = {
+    .uri = "/script.js",  // Match all URIs
+    .method = HTTP_GET,
+    .handler = file_get_handler,
+    .user_ctx = NULL
+};
+
+httpd_uri_t uri_logo_get = {
+    .uri = "/logo.png",  // Match all URIs
+    .method = HTTP_GET,
+    .handler = file_get_handler,
+    .user_ctx = NULL
+};
+
+
+
+httpd_handle_t setup_server(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    httpd_handle_t server = NULL;
+
+    if (httpd_start(&server, &config) == ESP_OK)
+    {
+        //httpd_register_uri_handler(server, &uri_get);
+        httpd_register_uri_handler(server, &uri_on);
+        httpd_register_uri_handler(server, &uri_off);
+        httpd_register_uri_handler(server, &uri_main);
+        httpd_register_uri_handler(server, &uri_style_get);
+        httpd_register_uri_handler(server, &uri_w3_get);
+        httpd_register_uri_handler(server, &uri_script_get);
+        httpd_register_uri_handler(server, &uri_logo_get);
+    }
+
+    return server;
+}
 
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
@@ -192,11 +374,16 @@ void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(1000));
 
+    s_led_state = 0;
+    ESP_LOGI(TAG, "LED Control SPIFFS Web Server is running ... ...\n");
+    initi_web_page_buffer();
+    setup_server();
+
     while(true)
     {
     	vTaskDelay(pdMS_TO_TICKS(100));
-    	s_led_state = gpio_get_level(BUTTON_GPIO);
-    	gpio_set_level(BLINK_GPIO, s_led_state);
-    	ESP_LOGW(TAG, "Button level : %d", s_led_state);
+    	//s_led_state = gpio_get_level(BUTTON_GPIO);
+    	//gpio_set_level(BLINK_GPIO, s_led_state);
+    	//ESP_LOGW(TAG, "Button level : %d", s_led_state);
     }
 }
